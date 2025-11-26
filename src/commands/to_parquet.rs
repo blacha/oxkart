@@ -40,6 +40,15 @@ pub struct ToParquetArgs {
 }
 
 fn extract_wkb(data: &[u8]) -> &[u8] {
+    // Kart/GeoPackage binary format:
+    // Header (8 bytes or more). Standard GPKG header is at least 8 bytes.
+    // Magic: 0x47 0x50 (GP)
+    // Version: 1 byte
+    // Flags: 1 byte
+    // SRS ID: 4 bytes
+    // Envelope: variable length (determined by flags)
+    // Then WKB.
+
     if data.len() < 8 || data[0] != 0x47 || data[1] != 0x50 {
         // Not a standard GPKG header we recognize, return as is or empty?
         // For now, assume it might be raw WKB if header missing (unlikely in Kart)
