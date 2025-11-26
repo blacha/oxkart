@@ -1,0 +1,23 @@
+[package]
+name = "oxkart"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+git2 = "0.19"
+gitoxide = "0.45.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rmp-serde = "1.1"
+rmpv = { version = "1.0", features = ["with-serde"] }
+walkdir = "2.3"
+hex = "0.4"
+base64 = "0.21"
+arrow = "53.0"
+parquet = { version = "53.0", features = ["zstd"] }
+geozero = "0.14"
+rayon = "1.8"
+itertools = "0.12"
+num-format = "0.4"
+mimalloc = "0.1"
