@@ -1,7 +1,15 @@
 [package]
 name = "oxkart"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/blacha/oxkart"
+description = "Kart utils"
+keywords = ["kart"]
+
+[[bin]]
+name = "oxkart"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
