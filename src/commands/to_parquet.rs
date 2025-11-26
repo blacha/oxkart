@@ -39,17 +39,7 @@ pub struct ToParquetArgs {
     pub git_prefix: Option<String>,
 }
 
-// Helper to extract WKB from Kart geometry blob (stripping 8-byte GPKG header if present)
 fn extract_wkb(data: &[u8]) -> &[u8] {
-    // Kart/GeoPackage binary format:
-    // Header (8 bytes or more). Standard GPKG header is at least 8 bytes.
-    // Magic: 0x47 0x50 (GP)
-    // Version: 1 byte
-    // Flags: 1 byte
-    // SRS ID: 4 bytes
-    // Envelope: variable length (determined by flags)
-    // Then WKB.
-
     if data.len() < 8 || data[0] != 0x47 || data[1] != 0x50 {
         // Not a standard GPKG header we recognize, return as is or empty?
         // For now, assume it might be raw WKB if header missing (unlikely in Kart)
@@ -94,7 +84,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         (false, args.path.clone())
     };
 
-    // Initialize Source
     let mut source = if is_git {
         eprintln!("Using Git source");
         if let Some(ref rev) = args.git_rev {
@@ -113,8 +102,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         KartSourceEnum::Fs(FsSource::new(&final_path))
     };
 
-    // 1. Load Schema
-    // If using Git and no prefix was specified, and get_schema fails, try to infer prefix from output filename
     let kart_schema = match source.get_schema() {
         Ok(s) => s,
         Err(e) => {
@@ -147,7 +134,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Build Arrow Schema and Column Builders
     let mut arrow_fields = Vec::new();
     let mut field_indices: HashMap<String, usize> = HashMap::new();
 
@@ -168,19 +154,15 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
 
-    // 2. Load Legends
     eprintln!("Loading legends...");
     let legend_cache = source.get_legends()?;
     eprintln!("Loaded {} legends", legend_cache.len());
 
-    // 3. Get Feature Identifiers
     let paths_iter = source.feature_identifiers();
 
-    // 4. Setup Writer Thread
     let output_path = Path::new(&args.output);
     let file = File::create(output_path)?;
 
-    // Construct GeoParquet metadata
     let mut columns = serde_json::Map::new();
     let mut geom_meta = serde_json::Map::new();
     geom_meta.insert(
@@ -282,15 +264,11 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         String(StringBuilder),
     }
 
-    // Pre-compute mapping from legend ID to schema indices
-    // Map<LegendID, Vec<Option<MsgpackIndex>>>
-    // For each column in the Arrow schema (output), where is it in the Msgpack array (input)?
     let mut legend_schema_mapping: HashMap<String, Vec<Option<usize>>> = HashMap::new();
 
     for (legend_id, (_pks, cols)) in &legend_cache {
         let mut mapping = Vec::with_capacity(kart_schema.len());
         for field in &kart_schema {
-            // Find which index in 'cols' matches 'field.id'
             let msgpack_idx = cols.iter().position(|c| c == &field.id);
             mapping.push(msgpack_idx);
         }
@@ -300,7 +278,7 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = std::sync::mpsc::channel::<RecordBatch>();
 
     let arrow_schema_clone = arrow_schema.clone();
-    // Writer thread
+
     let writer_handle = std::thread::spawn(
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut writer = ArrowWriter::try_new(file, arrow_schema_clone, Some(props))
@@ -316,7 +294,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                 total_features += batch_size;
             }
 
-            // Final stats
             let elapsed = start_time.elapsed();
             let fps = total_features as f64 / elapsed.as_secs_f64();
             eprintln!(
@@ -333,12 +310,9 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    // Process in parallel chunks using streaming iterator
     use itertools::Itertools;
 
     let chunk_size = 5000;
-
-    // Profiling counters removed
 
     paths_iter
         .batching(|it| {
@@ -354,7 +328,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         })
         .par_bridge()
         .for_each_with(tx, |tx, chunk| {
-            // Initialize builders for this chunk
             let mut col_builders: Vec<KartBuilder> = Vec::with_capacity(kart_schema.len());
             for field in &kart_schema {
                 let builder = match field.data_type.as_str() {
@@ -371,13 +344,11 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
             let mut row_count = 0;
 
             for path in chunk {
-                // Use zero-copy read_feature
                 let res = source.read_feature(&path, |buffer| {
                     if buffer.is_empty() {
                         return None;
                     }
 
-                    // Measure decode time (inside the closure to access buffer)
                     let val: Result<Value, _> = rmp_serde::from_slice(buffer);
 
                     Some(val)
@@ -400,7 +371,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // Measure build time
                 if let Value::Array(arr) = val {
                     if arr.len() >= 2 {
                         if let Value::String(ref legend_id_val) = arr[0] {
@@ -411,11 +381,9 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::Array(val_arr) = values {
                                     row_count += 1;
 
-                                    // Append to builders using pre-computed mapping
                                     for (idx, msgpack_idx_opt) in mapping.iter().enumerate() {
                                         let builder = &mut col_builders[idx];
 
-                                        // Get value from msgpack array if present
                                         let val_opt = if let Some(msgpack_idx) = msgpack_idx_opt {
                                             if *msgpack_idx < val_arr.len() {
                                                 Some(&val_arr[*msgpack_idx])
@@ -492,7 +460,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if row_count > 0 {
-                // Build RecordBatch for this chunk
                 let mut columns: Vec<ArrayRef> = Vec::new();
                 for builder in col_builders {
                     match builder {
@@ -517,7 +484,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-    // Wait for writer thread to finish
     match writer_handle.join() {
         Ok(result) => {
             if let Err(e) = result {
@@ -526,8 +492,6 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => eprintln!("Writer thread panicked: {e:?}"),
     }
-
-    // Profiling stats removed
 
     eprintln!("Successfully wrote GeoParquet to {}", output_path.display());
 

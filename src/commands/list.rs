@@ -80,7 +80,6 @@ fn list_git(path: &str, rev: Option<&str>) -> Result<(), Box<dyn std::error::Err
 
     let tree = obj.peel_to_tree()?;
 
-    // Recursive walk
     walk_git_tree(&repo, &tree, Path::new(""))?;
 
     Ok(())
@@ -91,8 +90,6 @@ fn walk_git_tree(
     tree: &git2::Tree,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Check if .table-dataset exists in this tree
-    // We can use tree.get_name to check for existence of .table-dataset
     if tree.get_name(".table-dataset").is_some() {
         let display_path = if path.as_os_str().is_empty() {
             Path::new(".")

@@ -37,7 +37,6 @@ impl std::fmt::Display for FeatureIdentifier {
     }
 }
 
-/// Enum wrapping different KartSource implementations
 pub enum KartSourceEnum {
     Fs(FsSource),
     Git(FsGit),
@@ -87,7 +86,6 @@ impl KartSourceEnum {
     }
 }
 
-/// Implementation of KartSource for the local filesystem
 pub struct FsSource {
     base_path: PathBuf,
 }
@@ -124,12 +122,9 @@ impl FsSource {
                     let file = File::open(entry.path())?;
                     let reader = BufReader::new(file);
 
-                    // Try parsing as JSON first
                     let legend_data: serde_json::Value = match serde_json::from_reader(reader) {
                         Ok(v) => v,
                         Err(_) => {
-                            // If JSON fails, try Msgpack (re-open file or read to buffer first)
-                            // Since we consumed reader, let's read to buffer first for robust handling
                             let mut file = File::open(entry.path())?;
                             let mut buffer = Vec::new();
                             file.read_to_end(&mut buffer)?;
@@ -192,7 +187,6 @@ impl FsSource {
     }
 
     fn get_crs_wkt(&self, crs_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-        // crs_id might be "EPSG:4167"
         let crs_filename = format!("{crs_id}.wkt");
         let crs_path = self
             .base_path
@@ -245,9 +239,6 @@ impl FsSource {
     }
 }
 
-// Imports removed
-
-/// Implementation of KartSource for a Git repository
 pub struct FsGit {
     repo_path: PathBuf,
     tree_id: Oid,
@@ -288,7 +279,6 @@ impl FsGit {
         }
     }
 
-    // Helper to get blob content, used by get_schema, get_crs_wkt, and get_legends
     fn get_blob_content_by_path(&self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         thread_local! {
             static REPO_CACHE: std::cell::RefCell<HashMap<PathBuf, Repository>> = std::cell::RefCell::new(HashMap::new());
@@ -324,12 +314,6 @@ impl FsGit {
     fn get_legends(&self) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error>> {
         let mut legend_cache = HashMap::new();
 
-        // We need to list files in .table-dataset/meta/legend
-        // This is harder with just get_blob_content. We need to traverse the tree.
-        // For now, let's assume we can list the directory.
-        // Since listing is complex without a full tree traversal helper, and we want to be fast,
-        // let's implement a specific tree traversal for this.
-
         thread_local! {
             static REPO_CACHE: std::cell::RefCell<HashMap<PathBuf, Repository>> = std::cell::RefCell::new(HashMap::new());
         }
@@ -345,12 +329,10 @@ impl FsGit {
             let tree = repo.find_tree(self.tree_id)?;
             let legend_dir_path = self.resolve_path(".table-dataset/meta/legend");
 
-            // Try to find the legend directory
             if let Ok(entry) = tree.get_path(&legend_dir_path) {
                 if let Ok(legend_tree) = entry.to_object(repo)?.peel_to_tree() {
                     for entry in legend_tree.iter() {
                         if let Some(name) = entry.name() {
-                            // Accept any file in legend directory
                             let legend_id = std::path::Path::new(name)
                                 .file_stem()
                                 .unwrap()
@@ -361,13 +343,10 @@ impl FsGit {
                                     let l_val: serde_json::Value =
                                         match serde_json::from_slice(blob.content()) {
                                             Ok(v) => v,
-                                            Err(_) => {
-                                                // Fallback to rmp_serde if json fails, though extension is json
-                                                match rmp_serde::from_slice(blob.content()) {
-                                                    Ok(v) => v,
-                                                    Err(_) => continue,
-                                                }
-                                            }
+                                            Err(_) => match rmp_serde::from_slice(blob.content()) {
+                                                Ok(v) => v,
+                                                Err(_) => continue,
+                                            },
                                         };
 
                                     if let Some(obj) = l_val.as_object() {
@@ -437,10 +416,6 @@ impl FsGit {
     }
 
     fn feature_identifiers(&self) -> Box<dyn Iterator<Item = FeatureIdentifier> + Send> {
-        // We need to traverse .table-dataset/feature
-        // This is blocking, but it's done once at start.
-        // To make it Send, we collect all OIDs into a Vec.
-
         let mut oids = Vec::new();
 
         if let Ok(repo) =
@@ -454,7 +429,6 @@ impl FsGit {
                         feature_tree
                             .walk(git2::TreeWalkMode::PreOrder, |_, entry| {
                                 if let Some(_name) = entry.name() {
-                                    // Check if it looks like a feature file (usually just check if it's a blob)
                                     if entry.kind() == Some(ObjectType::Blob) {
                                         oids.push(FeatureIdentifier::Oid(entry.id()));
                                     }
@@ -492,14 +466,12 @@ impl FsGit {
                             .expect("Failed to open repo")
                     });
 
-                    // Direct OID lookup - FAST!
-                    // Optimization: Use odb().read() to skip Blob wrapper creation
                     if let Ok(odb) = repo.odb() {
                         if let Ok(obj) = odb.read(*oid) {
                             return Ok(f(obj.data()));
                         }
                     }
-                    // Fallback to find_blob if odb fails for some reason
+
                     if let Ok(blob) = repo.find_blob(*oid) {
                         return Ok(f(blob.content()));
                     }
