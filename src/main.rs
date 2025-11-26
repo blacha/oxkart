@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use git2::{Repository, TreeWalkMode, TreeWalkResult};
 use std::path::PathBuf;
 
 mod commands;
