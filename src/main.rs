@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 mod commands;
@@ -14,11 +14,6 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Path to the bare Git repository (e.g., /path/to/my_repo.git)
-    /// (Optional if using a subcommand)
-    #[clap(short, long, value_parser)]
-    repo_path: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -45,6 +40,9 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        None => todo!(),
+        None => {
+            let mut cmd = Cli::command();
+            cmd.print_help().unwrap();
+        }
     }
 }
