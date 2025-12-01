@@ -29,7 +29,7 @@ pub struct ToParquetArgs {
     #[arg(long)]
     pub compression_level: Option<i32>,
     /// Max row group size (number of rows)
-    #[arg(long, default_value_t = 100000)]
+    #[arg(long, default_value_t = 8192)]
     pub row_group_size: usize,
     /// Git revision (branch, tag, sha) to read from (default: HEAD)
     #[arg(long)]
@@ -238,7 +238,7 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
         "brotli" => parquet::basic::Compression::BROTLI(parquet::basic::BrotliLevel::default()),
         "lz4" => parquet::basic::Compression::LZ4,
         "zstd" => {
-            let level = args.compression_level.unwrap_or(3);
+            let level = args.compression_level.unwrap_or(9);
             parquet::basic::Compression::ZSTD(
                 parquet::basic::ZstdLevel::try_new(level).unwrap_or_default(),
             )
@@ -248,7 +248,7 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "Unknown compression '{}', defaulting to ZSTD",
                 args.compression
             );
-            let level = args.compression_level.unwrap_or(3);
+            let level = args.compression_level.unwrap_or(9);
             parquet::basic::Compression::ZSTD(
                 parquet::basic::ZstdLevel::try_new(level).unwrap_or_default(),
             )
@@ -300,7 +300,20 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                 writer
                     .write(&batch)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+                let prev_count = total_features;
                 total_features += batch_size;
+
+                if total_features / 100_000 > prev_count / 100_000 {
+                    let elapsed = start_time.elapsed();
+                    let fps = total_features as f64 / elapsed.as_secs_f64();
+                    eprintln!(
+                        "Processed {} features in {:.2?} ({} features/sec)",
+                        total_features.to_formatted_string(&Locale::en),
+                        elapsed,
+                        (fps as u64).to_formatted_string(&Locale::en)
+                    );
+                }
             }
 
             let elapsed = start_time.elapsed();
@@ -321,7 +334,7 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     use itertools::Itertools;
 
-    let chunk_size = 5000;
+    let chunk_size = 4_096;
 
     paths_iter
         .batching(|it| {
@@ -380,90 +393,86 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                if let Value::Array(arr) = val {
-                    if arr.len() >= 2 {
-                        if let Value::String(ref legend_id_val) = arr[0] {
-                            let legend_id = legend_id_val.as_str().unwrap_or_default();
+                let Value::Array(arr) = val else {
+                    continue;
+                };
 
-                            if let Some(mapping) = legend_schema_mapping.get(legend_id) {
-                                let values = &arr[1];
-                                if let Value::Array(val_arr) = values {
-                                    row_count += 1;
+                if arr.len() < 2 {
+                    continue;
+                }
 
-                                    for (idx, msgpack_idx_opt) in mapping.iter().enumerate() {
-                                        let builder = &mut col_builders[idx];
+                let Value::String(ref legend_id_val) = arr[0] else {
+                    continue;
+                };
 
-                                        let val_opt = if let Some(msgpack_idx) = msgpack_idx_opt {
-                                            if *msgpack_idx < val_arr.len() {
-                                                Some(&val_arr[*msgpack_idx])
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        };
+                let legend_id = legend_id_val.as_str().unwrap_or_default();
 
-                                        match builder {
-                                            KartBuilder::Boolean(b_builder) => match val_opt {
-                                                Some(Value::Boolean(b)) => {
-                                                    b_builder.append_value(*b)
-                                                }
-                                                _ => b_builder.append_null(),
-                                            },
-                                            KartBuilder::Int64(i_builder) => match val_opt {
-                                                Some(Value::Integer(n)) => {
-                                                    if n.is_i64() {
-                                                        i_builder.append_value(n.as_i64().unwrap());
-                                                    } else {
-                                                        i_builder.append_value(
-                                                            n.as_u64().unwrap() as i64
-                                                        );
-                                                    }
-                                                }
-                                                _ => i_builder.append_null(),
-                                            },
-                                            KartBuilder::Float64(f_builder) => match val_opt {
-                                                Some(Value::F64(f)) => f_builder.append_value(*f),
-                                                Some(Value::F32(f)) => {
-                                                    f_builder.append_value(*f as f64)
-                                                }
-                                                _ => f_builder.append_null(),
-                                            },
-                                            KartBuilder::String(s_builder) => match val_opt {
-                                                Some(Value::String(s)) => {
-                                                    s_builder.append_value(s.as_str().unwrap())
-                                                }
-                                                Some(Value::Integer(n)) => {
-                                                    s_builder.append_value(n.to_string())
-                                                }
-                                                Some(Value::F64(f)) => {
-                                                    s_builder.append_value(f.to_string())
-                                                }
-                                                Some(Value::F32(f)) => {
-                                                    s_builder.append_value(f.to_string())
-                                                }
-                                                Some(Value::Boolean(b)) => {
-                                                    s_builder.append_value(b.to_string())
-                                                }
-                                                _ => s_builder.append_null(),
-                                            },
-                                            KartBuilder::Binary(bin_builder) => match val_opt {
-                                                Some(Value::Ext(type_id, data))
-                                                    if *type_id == 71 =>
-                                                {
-                                                    let wkb = extract_wkb(data);
-                                                    bin_builder.append_value(wkb);
-                                                }
-                                                Some(Value::Binary(b)) => {
-                                                    bin_builder.append_value(b)
-                                                }
-                                                _ => bin_builder.append_null(),
-                                            },
-                                        }
-                                    }
+                let Some(mapping) = legend_schema_mapping.get(legend_id) else {
+                    continue;
+                };
+
+                let Value::Array(val_arr) = &arr[1] else {
+                    continue;
+                };
+
+                row_count += 1;
+
+                for (idx, msgpack_idx_opt) in mapping.iter().enumerate() {
+                    let builder = &mut col_builders[idx];
+
+                    let val_opt = if let Some(msgpack_idx) = msgpack_idx_opt {
+                        if *msgpack_idx < val_arr.len() {
+                            Some(&val_arr[*msgpack_idx])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    match builder {
+                        KartBuilder::Boolean(b_builder) => match val_opt {
+                            Some(Value::Boolean(b)) => b_builder.append_value(*b),
+                            _ => b_builder.append_null(),
+                        },
+                        KartBuilder::Int64(i_builder) => match val_opt {
+                            Some(Value::Integer(n)) => {
+                                if n.is_i64() {
+                                    i_builder.append_value(n.as_i64().unwrap());
+                                } else {
+                                    i_builder.append_value(n.as_u64().unwrap() as i64);
                                 }
                             }
-                        }
+                            _ => i_builder.append_null(),
+                        },
+                        KartBuilder::Float64(f_builder) => match val_opt {
+                            Some(Value::F64(f)) => f_builder.append_value(*f),
+                            Some(Value::F32(f)) => f_builder.append_value(*f as f64),
+                            _ => f_builder.append_null(),
+                        },
+                        KartBuilder::String(s_builder) => match val_opt {
+                            Some(Value::String(s)) => s_builder.append_value(s.as_str().unwrap()),
+                            Some(Value::Integer(n)) => s_builder.append_value(n.to_string()),
+                            Some(Value::F64(f)) => s_builder.append_value(f.to_string()),
+                            Some(Value::F32(f)) => s_builder.append_value(f.to_string()),
+                            Some(Value::Boolean(b)) => s_builder.append_value(b.to_string()),
+                            Some(Value::Map(_)) | Some(Value::Array(_)) => {
+                                if let Ok(json_str) = serde_json::to_string(val_opt.unwrap()) {
+                                    s_builder.append_value(json_str);
+                                } else {
+                                    s_builder.append_null();
+                                }
+                            }
+                            _ => s_builder.append_null(),
+                        },
+                        KartBuilder::Binary(bin_builder) => match val_opt {
+                            Some(Value::Ext(type_id, data)) if *type_id == 71 => {
+                                let wkb = extract_wkb(data);
+                                bin_builder.append_value(wkb);
+                            }
+                            Some(Value::Binary(b)) => bin_builder.append_value(b),
+                            _ => bin_builder.append_null(),
+                        },
                     }
                 }
             }
@@ -505,4 +514,277 @@ pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Successfully wrote GeoParquet to {}", output_path.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::RowAccessor;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn create_schema(
+        root: &Path,
+        fields: Vec<serde_json::Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let schema_dir = root.join(".table-dataset/meta");
+        fs::create_dir_all(&schema_dir)?;
+        let schema_json = serde_json::to_string(&fields)?;
+        fs::write(schema_dir.join("schema.json"), schema_json)?;
+        Ok(())
+    }
+
+    fn create_legend(
+        root: &Path,
+        name: &str,
+        pks: Vec<&str>,
+        cols: Vec<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let legend_dir = root.join(".table-dataset/meta/legend");
+        fs::create_dir_all(&legend_dir)?;
+        let legend_data = serde_json::json!([pks, cols]);
+        let legend_json = serde_json::to_string(&legend_data)?;
+        fs::write(legend_dir.join(name), legend_json)?;
+        Ok(())
+    }
+
+    fn create_crs(root: &Path, id: &str, wkt: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let crs_dir = root.join(".table-dataset/meta/crs");
+        fs::create_dir_all(&crs_dir)?;
+        fs::write(crs_dir.join(format!("{}.wkt", id)), wkt)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_export() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        create_schema(
+            root,
+            vec![
+                serde_json::json!({"id": "col1", "name": "name", "dataType": "text"}),
+                serde_json::json!({"id": "col2", "name": "metadata", "dataType": "json"}),
+            ],
+        )?;
+
+        create_legend(root, "legend1", vec![], vec!["col1", "col2"])?;
+
+        let feature_dir = root.join(".table-dataset/feature");
+        fs::create_dir_all(&feature_dir)?;
+
+        let feature_data = Value::Array(vec![
+            Value::String("legend1".into()),
+            Value::Array(vec![
+                Value::String("test_name".into()),
+                Value::Map(vec![
+                    (Value::String("key".into()), Value::String("value".into())),
+                    (
+                        Value::String("list".into()),
+                        Value::Array(vec![Value::Integer(1.into()), Value::Integer(2.into())]),
+                    ),
+                ]),
+            ]),
+        ]);
+
+        let mut feature_bytes = Vec::new();
+        rmp_serde::encode::write(&mut feature_bytes, &feature_data)?;
+        fs::write(feature_dir.join("feat1"), feature_bytes)?;
+
+        let output_path = root.join("output.parquet");
+
+        let args = ToParquetArgs {
+            path: root.to_string_lossy().to_string(),
+            output: output_path.to_string_lossy().to_string(),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+        };
+
+        run(args)?;
+
+        let file = File::open(&output_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+
+        let rows: Vec<_> = iter.collect();
+        assert_eq!(rows.len(), 1);
+
+        let row = rows[0].as_ref().unwrap();
+        let name = row.get_string(0)?;
+        let metadata = row.get_string(1)?;
+
+        assert_eq!(name, "test_name");
+
+        let parsed: serde_json::Value = serde_json::from_str(metadata)?;
+        assert_eq!(parsed["key"], "value");
+        assert_eq!(parsed["list"][0], 1);
+        assert_eq!(parsed["list"][1], 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_projection_export() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        create_schema(
+            root,
+            vec![
+                serde_json::json!({"id": "col1", "name": "geom", "dataType": "geometry", "geometryCRS": "2193"}),
+            ],
+        )?;
+
+        let wkt_2193 = r#"PROJCS["NZGD2000 / New Zealand Transverse Mercator 2000",GEOGCS["NZGD2000",DATUM["New_Zealand_Geodetic_Datum_2000",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6167"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4167"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",173],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",1600000],PARAMETER["false_northing",10000000],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","2193"]]"#;
+        create_crs(root, "2193", wkt_2193)?;
+
+        create_legend(root, "legend1", vec![], vec!["col1"])?;
+
+        let feature_dir = root.join(".table-dataset/feature");
+        fs::create_dir_all(&feature_dir)?;
+
+        let wkb = hex::decode("010100000000000000000000000000000000000000")?;
+
+        let feature_data = Value::Array(vec![
+            Value::String("legend1".into()),
+            Value::Array(vec![Value::Binary(wkb)]),
+        ]);
+
+        let mut feature_bytes = Vec::new();
+        rmp_serde::encode::write(&mut feature_bytes, &feature_data)?;
+        fs::write(feature_dir.join("feat1"), feature_bytes)?;
+
+        let output_path = root.join("output.parquet");
+
+        let args = ToParquetArgs {
+            path: root.to_string_lossy().to_string(),
+            output: output_path.to_string_lossy().to_string(),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+        };
+
+        run(args)?;
+
+        let file = File::open(&output_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let metadata = reader.metadata();
+        let kv_metadata = metadata.file_metadata().key_value_metadata().unwrap();
+
+        let geo_meta_str = kv_metadata
+            .iter()
+            .find(|kv| kv.key == "geo")
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap();
+        let geo_meta: serde_json::Value = serde_json::from_str(geo_meta_str)?;
+
+        let crs = &geo_meta["columns"]["geom"]["crs"];
+        assert_eq!(crs["encoding"], "wkt");
+        let wkt_out = crs["wkt"].as_str().unwrap();
+        assert!(wkt_out.contains(r#"AUTHORITY["EPSG","2193"]"#));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_data_fidelity() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        create_schema(
+            root,
+            vec![
+                serde_json::json!({"id": "col_text", "name": "text_field", "dataType": "text"}),
+                serde_json::json!({"id": "col_int", "name": "int_field", "dataType": "integer"}),
+                serde_json::json!({"id": "col_float", "name": "float_field", "dataType": "float"}),
+                serde_json::json!({"id": "col_bool", "name": "bool_field", "dataType": "boolean"}),
+                serde_json::json!({"id": "col_json", "name": "json_field", "dataType": "json"}),
+                serde_json::json!({"id": "col_geom", "name": "geom_field", "dataType": "geometry"}),
+            ],
+        )?;
+
+        create_legend(
+            root,
+            "legend1",
+            vec![],
+            vec![
+                "col_text",
+                "col_int",
+                "col_float",
+                "col_bool",
+                "col_json",
+                "col_geom",
+            ],
+        )?;
+
+        let feature_dir = root.join(".table-dataset/feature");
+        fs::create_dir_all(&feature_dir)?;
+
+        let wkb = hex::decode("010100000000000000000000000000000000000000")?;
+
+        let feature_data = Value::Array(vec![
+            Value::String("legend1".into()),
+            Value::Array(vec![
+                Value::String("some text".into()),
+                Value::Integer(42.into()),
+                Value::F64(3.14159),
+                Value::Boolean(true),
+                Value::Map(vec![(
+                    Value::String("foo".into()),
+                    Value::String("bar".into()),
+                )]),
+                Value::Binary(wkb.clone()),
+            ]),
+        ]);
+
+        let mut feature_bytes = Vec::new();
+        rmp_serde::encode::write(&mut feature_bytes, &feature_data)?;
+        fs::write(feature_dir.join("feat1"), feature_bytes)?;
+
+        let output_path = root.join("output.parquet");
+
+        let args = ToParquetArgs {
+            path: root.to_string_lossy().to_string(),
+            output: output_path.to_string_lossy().to_string(),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+        };
+
+        run(args)?;
+
+        let file = File::open(&output_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+
+        let rows: Vec<_> = iter.collect();
+        assert_eq!(rows.len(), 1);
+
+        let row = rows[0].as_ref().unwrap();
+
+        assert_eq!(row.get_string(0)?, "some text");
+        assert_eq!(row.get_long(1)?, 42);
+        assert!((row.get_double(2)? - 3.14159).abs() < 1e-10);
+        assert_eq!(row.get_bool(3)?, true);
+
+        let json_str = row.get_string(4)?;
+        let json_val: serde_json::Value = serde_json::from_str(json_str)?;
+        assert_eq!(json_val["foo"], "bar");
+
+        let geom_bytes = row.get_bytes(5)?;
+        assert_eq!(geom_bytes.data(), wkb.as_slice());
+
+        Ok(())
+    }
 }

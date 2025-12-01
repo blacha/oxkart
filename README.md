@@ -2,8 +2,10 @@
 
 CLI to convert kart datasets into parquet
 
-## List datasets
 
+
+
+## List datasets
 ```bash
 $ oxkart list ~/kart-test
 
@@ -24,7 +26,10 @@ Can be run on both packed `.git` or `.kart` indexes and on full clones
 
 ```bash
 $ gh repo clone blacha/kart-test
-$ ls kart-test/nz_vineyard_polygons_topo_150k
+$ ls -a1 kart-test/nz_vineyard_polygons_topo_150k
+
+metadata.xml
+.table-dataset/
 
 # Read from the file system
 $ oxkart to-parquet ~/kart-test/nz_vineyard_polygons_topo_150k nz_vineyard_polygons_topo_150k.parquet
