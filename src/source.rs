@@ -84,6 +84,16 @@ impl KartSourceEnum {
             KartSourceEnum::Git(s) => s.read_feature(id, f),
         }
     }
+
+    pub fn get_feature_size(
+        &self,
+        id: &FeatureIdentifier,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        match self {
+            KartSourceEnum::Fs(s) => s.get_feature_size(id),
+            KartSourceEnum::Git(s) => s.get_feature_size(id),
+        }
+    }
 }
 
 pub struct FsSource {
@@ -233,6 +243,16 @@ impl FsSource {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer)?;
                 Ok(f(&buffer))
+            }
+            _ => Err("Invalid identifier for FsSource".into()),
+        }
+    }
+
+    fn get_feature_size(&self, id: &FeatureIdentifier) -> Result<u64, Box<dyn std::error::Error>> {
+        match id {
+            FeatureIdentifier::Path(path) => {
+                let metadata = std::fs::metadata(path)?;
+                Ok(metadata.len())
             }
             _ => Err("Invalid identifier for FsSource".into()),
         }
@@ -474,6 +494,37 @@ impl FsGit {
 
                     if let Ok(blob) = repo.find_blob(*oid) {
                         return Ok(f(blob.content()));
+                    }
+                    Err(format!("Blob not found: {}", oid).into())
+                })
+            }
+            _ => Err("Invalid identifier for FsGit".into()),
+        }
+    }
+
+    fn get_feature_size(&self, id: &FeatureIdentifier) -> Result<u64, Box<dyn std::error::Error>> {
+        match id {
+            FeatureIdentifier::Oid(oid) => {
+                thread_local! {
+                    static REPO_CACHE: std::cell::RefCell<HashMap<PathBuf, Repository>> = std::cell::RefCell::new(HashMap::new());
+                }
+
+                REPO_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    let repo = cache.entry(self.repo_path.clone()).or_insert_with(|| {
+                        Repository::open_bare(&self.repo_path)
+                            .or_else(|_| Repository::open(&self.repo_path))
+                            .expect("Failed to open repo")
+                    });
+
+                    if let Ok(odb) = repo.odb() {
+                        if let Ok((len, _)) = odb.read_header(*oid) {
+                            return Ok(len as u64);
+                        }
+                    }
+
+                    if let Ok(blob) = repo.find_blob(*oid) {
+                        return Ok(blob.size() as u64);
                     }
                     Err(format!("Blob not found: {}", oid).into())
                 })
