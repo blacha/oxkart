@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SchemaField {
     pub id: String,
     pub name: String,

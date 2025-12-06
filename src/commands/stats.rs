@@ -180,3 +180,45 @@ fn calculate_stats(
 
     Ok(DatasetStats { name, count, size })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_stats_fs_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats = stats_fs(temp_dir.path().to_str().unwrap()).unwrap();
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_stats_fs_simple() {
+        let temp_dir = TempDir::new().unwrap();
+        let dataset_path = temp_dir.path().join("dataset1");
+        fs::create_dir(&dataset_path).unwrap();
+        fs::create_dir(dataset_path.join(".table-dataset")).unwrap();
+
+        // Mock feature directory and files
+        let feature_dir = dataset_path.join(".table-dataset/feature");
+        fs::create_dir(&feature_dir).unwrap();
+
+        let feature1 = feature_dir.join("f1");
+        let feature2 = feature_dir.join("f2");
+
+        // Create 2 files with known size (10 bytes each)
+        let content = vec![0u8; 10];
+        fs::write(&feature1, &content).unwrap();
+        fs::write(&feature2, &content).unwrap();
+
+        let stats = stats_fs(temp_dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(stats.len(), 1);
+
+        let stat = &stats[0];
+        assert_eq!(stat.name, "dataset1");
+        assert_eq!(stat.count, 2);
+        assert_eq!(stat.size, 20);
+    }
+}
