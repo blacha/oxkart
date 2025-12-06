@@ -75,23 +75,7 @@ fn extract_wkb(data: &[u8]) -> &[u8] {
 pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Starting to-parquet conversion...");
 
-    let path = std::path::Path::new(&args.path);
-    let kart_dir = path.join(".kart");
-    let git_dir = path.join(".git");
-
-    let (is_git, final_path) = if args.path.ends_with(".git")
-        || args.path.ends_with(".kart")
-        || args.path.ends_with(".git/")
-        || args.path.ends_with(".kart/")
-    {
-        (true, args.path.clone())
-    } else if kart_dir.exists() && kart_dir.is_dir() {
-        (true, kart_dir.to_string_lossy().to_string())
-    } else if git_dir.exists() && git_dir.is_dir() {
-        (true, git_dir.to_string_lossy().to_string())
-    } else {
-        (false, args.path.clone())
-    };
+    let (is_git, final_path) = crate::commands::resolve_source_path(&args.path);
 
     let mut source = if is_git {
         eprintln!("Using Git source");
