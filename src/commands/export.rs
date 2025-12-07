@@ -21,7 +21,7 @@ pub struct ExportArgs {
     /// Path to the dataset directory (e.g., sample/nz_topo_map_sheet)
     pub path: String,
     /// Output Parquet file path
-    pub output: String,
+    pub output: Option<String>,
     /// Compression (uncompressed, snappy, gzip, lzo, brotli, lz4, zstd)
     #[arg(long, default_value = "zstd")]
     pub compression: String,
@@ -98,9 +98,36 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let kart_schema = match source.get_schema() {
         Ok(s) => s,
         Err(e) => {
-            if is_git && args.git_prefix.is_none() {
+            // Try to find datasets in the path if we are at the root
+            let mut datasets =
+                crate::commands::find_datasets(&final_path, is_git, args.git_rev.as_deref())
+                    .unwrap_or_default();
+
+            if datasets.len() == 1 {
+                let (name, new_source) = datasets.pop().unwrap();
+                eprintln!("Automatically selected dataset: {}", name);
+                source = new_source;
+                source.get_schema()?
+            } else if datasets.len() > 1 {
+                eprintln!("Multiple datasets found:");
+                for (name, _) in datasets {
+                    eprintln!("  - {}", name);
+                }
+                return Err(Box::from(
+                    "Multiple datasets found. Please specify which one to export.",
+                ));
+            } else if is_git && args.git_prefix.is_none() {
                 // Try to infer prefix from output filename
-                let output_path = Path::new(&args.output);
+                let output_str = args
+                    .output
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        let path = Path::new(&args.path);
+                        let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
+                        format!("{}.parquet", file_stem.replace('-', "_"))
+                    });
+                let output_path = Path::new(&output_str);
                 if let Some(file_stem) = output_path.file_stem() {
                     let inferred_prefix = file_stem.to_string_lossy().to_string();
                     eprintln!(
@@ -153,7 +180,12 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let paths_iter = source.feature_identifiers();
 
-    let output_path = Path::new(&args.output);
+    let output_str = args.output.unwrap_or_else(|| {
+        let path = Path::new(&args.path);
+        let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
+        format!("{}.parquet", file_stem.replace('-', "_"))
+    });
+    let output_path = Path::new(&output_str);
     let file = File::create(output_path)?;
 
     let mut columns = serde_json::Map::new();
@@ -581,7 +613,7 @@ mod tests {
 
         let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
-            output: output_path.to_string_lossy().to_string(),
+            output: Some(output_path.to_string_lossy().to_string()),
             compression: "uncompressed".to_string(),
             compression_level: None,
             row_group_size: 1000,
@@ -647,7 +679,7 @@ mod tests {
 
         let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
-            output: output_path.to_string_lossy().to_string(),
+            output: Some(output_path.to_string_lossy().to_string()),
             compression: "uncompressed".to_string(),
             compression_level: None,
             row_group_size: 1000,
@@ -738,7 +770,7 @@ mod tests {
 
         let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
-            output: output_path.to_string_lossy().to_string(),
+            output: Some(output_path.to_string_lossy().to_string()),
             compression: "uncompressed".to_string(),
             compression_level: None,
             row_group_size: 1000,
