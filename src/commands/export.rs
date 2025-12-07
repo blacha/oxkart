@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::source::{FsGit, FsSource, KartSourceEnum};
 
 #[derive(Args, Debug, Clone)]
-pub struct ToParquetArgs {
+pub struct ExportArgs {
     /// Path to the dataset directory (e.g., sample/nz_topo_map_sheet)
     pub path: String,
     /// Output Parquet file path
@@ -72,8 +72,8 @@ fn extract_wkb(data: &[u8]) -> &[u8] {
     }
 }
 
-pub fn run(args: ToParquetArgs) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Starting to-parquet conversion...");
+pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Starting export...");
 
     let (is_git, final_path) = crate::commands::resolve_source_path(&args.path);
 
@@ -579,7 +579,7 @@ mod tests {
 
         let output_path = root.join("output.parquet");
 
-        let args = ToParquetArgs {
+        let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
             output: output_path.to_string_lossy().to_string(),
             compression: "uncompressed".to_string(),
@@ -645,7 +645,7 @@ mod tests {
 
         let output_path = root.join("output.parquet");
 
-        let args = ToParquetArgs {
+        let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
             output: output_path.to_string_lossy().to_string(),
             compression: "uncompressed".to_string(),
@@ -736,7 +736,7 @@ mod tests {
 
         let output_path = root.join("output.parquet");
 
-        let args = ToParquetArgs {
+        let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
             output: output_path.to_string_lossy().to_string(),
             compression: "uncompressed".to_string(),

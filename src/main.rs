@@ -18,7 +18,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Convert Kart dataset to GeoParquet
-    ToParquet(commands::to_parquet::ToParquetArgs),
+    Export(commands::export::ExportArgs),
     /// List Kart datasets in a directory or Git repository
     List(commands::list::ListArgs),
 }
@@ -27,8 +27,8 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::ToParquet(args)) => {
-            if let Err(e) = commands::to_parquet::run(args.clone()) {
+        Some(Commands::Export(args)) => {
+            if let Err(e) = commands::export::run(args.clone()) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
