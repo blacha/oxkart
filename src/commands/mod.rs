@@ -104,7 +104,10 @@ fn walk_git_tree(
             path
         };
         let name = display_path.display().to_string();
-        let source = KartSourceEnum::Git(FsGit::new(repo_path, rev, path.to_str())?);
+        let source = KartSourceEnum::Git(
+            FsGit::new(repo_path, rev, path.to_str())
+                .map_err(|e| e as Box<dyn std::error::Error>)?,
+        );
         datasets.push((name, source));
         return Ok(());
     }

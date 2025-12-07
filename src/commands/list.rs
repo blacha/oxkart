@@ -70,7 +70,11 @@ pub fn run(args: ListArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         let mut schema = None;
         if args.schema {
-            schema = Some(serde_json::to_value(source.get_schema()?)?);
+            schema = Some(serde_json::to_value(
+                source
+                    .get_schema()
+                    .map_err(|e| e as Box<dyn std::error::Error>)?,
+            )?);
         }
 
         if args.json {

@@ -37,6 +37,9 @@ pub struct ExportArgs {
     /// Path inside the Git repository to the dataset root
     #[arg(long)]
     pub git_prefix: Option<String>,
+    /// Export all datasets found in the path
+    #[arg(long)]
+    pub all: bool,
 }
 
 fn extract_wkb(data: &[u8]) -> &[u8] {
@@ -77,6 +80,56 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let (is_git, final_path) = crate::commands::resolve_source_path(&args.path);
 
+    if args.all {
+        let datasets = crate::commands::find_datasets(&final_path, is_git, args.git_rev.as_deref())
+            .unwrap_or_default();
+
+        if datasets.is_empty() {
+            return Err(Box::from("No datasets found to export."));
+        }
+
+        eprintln!("Found {} datasets to export", datasets.len());
+
+        let output_base = if let Some(ref out) = args.output {
+            let path = Path::new(out);
+            if !path.exists() {
+                std::fs::create_dir_all(path)?;
+            }
+            if !path.is_dir() {
+                return Err(Box::from(
+                    "Output path must be a directory when using --all",
+                ));
+            }
+            Some(path.to_path_buf())
+        } else {
+            None
+        };
+
+        // Capture args and output_base for parallel iteration
+        let args_arc = Arc::new(args.clone());
+        let output_base_arc = Arc::new(output_base);
+
+        datasets
+            .into_par_iter()
+            .try_for_each(|(name, source)| {
+                let output_path = if let Some(ref base) = *output_base_arc {
+                    base.join(format!("{}.parquet", name))
+                } else {
+                    let normalized = name.replace('-', "_");
+                    Path::new(&format!("{}.parquet", normalized)).to_path_buf()
+                };
+
+                export_dataset(source, &output_path, &args_arc, &name).map_err(
+                    |e| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::from(format!("Dataset '{}' failed: {}", name, e))
+                    },
+                )
+            })
+            .map_err(|e| e as Box<dyn std::error::Error>)?;
+
+        return Ok(());
+    }
+
     let mut source = if is_git {
         eprintln!("Using Git source");
         if let Some(ref rev) = args.git_rev {
@@ -85,29 +138,62 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref prefix) = args.git_prefix {
             eprintln!("Prefix: {}", prefix);
         }
-        KartSourceEnum::Git(FsGit::new(
-            &final_path,
-            args.git_rev.as_deref(),
-            args.git_prefix.as_deref(),
-        )?)
+        KartSourceEnum::Git(
+            FsGit::new(
+                &final_path,
+                args.git_rev.as_deref(),
+                args.git_prefix.as_deref(),
+            )
+            .map_err(|e| e as Box<dyn std::error::Error>)?,
+        )
     } else {
         eprintln!("Using Filesystem source");
         KartSourceEnum::Fs(FsSource::new(&final_path))
     };
 
-    let kart_schema = match source.get_schema() {
-        Ok(s) => s,
+    match source.get_schema() {
+        Ok(_) => {} // successfully loaded schema, source is valid
         Err(e) => {
+            let e: Box<dyn std::error::Error> = e; // Downcast for compatibility
             // Try to find datasets in the path if we are at the root
             let mut datasets =
                 crate::commands::find_datasets(&final_path, is_git, args.git_rev.as_deref())
                     .unwrap_or_default();
 
+            if datasets.len() > 1 {
+                if let Some(ref output) = args.output {
+                    let output_path = Path::new(output);
+                    if let Some(file_stem) = output_path.file_stem() {
+                        let stem_str = file_stem.to_string_lossy().to_string();
+                        // Filter datasets that end with the stem (or some reasonable matching)
+                        let matched_indices: Vec<usize> = datasets
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (name, _))| {
+                                // Simple logic: if dataset name exactly matches stem, or ends with stem
+                                let normalized_name = name.replace('-', "_");
+                                let normalized_stem = stem_str.replace('-', "_");
+                                normalized_name.ends_with(&normalized_stem)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+
+                        if matched_indices.len() == 1 {
+                            let idx = matched_indices[0];
+                            let val = datasets.remove(idx);
+                            datasets = vec![val];
+                        }
+                    }
+                }
+            }
+
             if datasets.len() == 1 {
                 let (name, new_source) = datasets.pop().unwrap();
                 eprintln!("Automatically selected dataset: {}", name);
                 source = new_source;
-                source.get_schema()?
+                source
+                    .get_schema()
+                    .map_err(|e| e as Box<dyn std::error::Error>)?;
             } else if datasets.len() > 1 {
                 eprintln!("Multiple datasets found:");
                 for (name, _) in datasets {
@@ -137,11 +223,11 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
 
                     // Re-initialize source with inferred prefix
                     let new_source =
-                        FsGit::new(&final_path, args.git_rev.as_deref(), Some(&inferred_prefix))?;
+                        FsGit::new(&final_path, args.git_rev.as_deref(), Some(&inferred_prefix))
+                            .map_err(|e| e as Box<dyn std::error::Error>)?;
                     match new_source.get_schema() {
-                        Ok(s) => {
+                        Ok(_) => {
                             source = KartSourceEnum::Git(new_source); // Update source to use the new one
-                            s
                         }
                         Err(_) => return Err(e), // Return original error if inference fails
                     }
@@ -153,6 +239,30 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+
+    let output_str = args.output.clone().unwrap_or_else(|| {
+        let path = Path::new(&args.path);
+        let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
+        format!("{}.parquet", file_stem.replace('-', "_"))
+    });
+    let output_path = Path::new(&output_str);
+    let table_name = output_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    export_dataset(source, output_path, &args, &table_name)
+        .map_err(|e| e as Box<dyn std::error::Error>)
+}
+
+fn export_dataset(
+    source: KartSourceEnum,
+    output_path: &Path,
+    args: &ExportArgs,
+    table_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let kart_schema = source.get_schema()?;
 
     let mut arrow_fields = Vec::new();
     let mut field_indices: HashMap<String, usize> = HashMap::new();
@@ -174,18 +284,12 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
 
-    eprintln!("Loading legends...");
+    eprintln!("[{}] Loading legends...", table_name);
     let legend_cache = source.get_legends()?;
-    eprintln!("Loaded {} legends", legend_cache.len());
+    eprintln!("[{}] Loaded {} legends", table_name, legend_cache.len());
 
     let paths_iter = source.feature_identifiers();
 
-    let output_str = args.output.unwrap_or_else(|| {
-        let path = Path::new(&args.path);
-        let file_stem = path.file_name().unwrap_or_default().to_string_lossy();
-        format!("{}.parquet", file_stem.replace('-', "_"))
-    });
-    let output_path = Path::new(&output_str);
     let file = File::create(output_path)?;
 
     let mut columns = serde_json::Map::new();
@@ -222,10 +326,10 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
                             "wkt": clean_wkt
                         }),
                     );
-                    eprintln!("Loaded CRS for {crs_id}");
+                    eprintln!("[{}] Loaded CRS for {crs_id}", table_name);
                 }
                 Err(e) => {
-                    eprintln!("Failed to load CRS for {crs_id}: {e}");
+                    eprintln!("[{}] Failed to load CRS for {crs_id}: {e}", table_name);
                 }
             }
         }
@@ -261,8 +365,8 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "Unknown compression '{}', defaulting to ZSTD",
-                args.compression
+                "[{}] Unknown compression '{}', defaulting to ZSTD",
+                table_name, args.compression
             );
             let level = args.compression_level.unwrap_or(9);
             parquet::basic::Compression::ZSTD(
@@ -303,6 +407,7 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = std::sync::mpsc::channel::<RecordBatch>();
 
     let arrow_schema_clone = arrow_schema.clone();
+    let table_name_clone = table_name.to_string();
 
     let writer_handle = std::thread::spawn(
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -324,7 +429,8 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
                     let elapsed = start_time.elapsed();
                     let fps = total_features as f64 / elapsed.as_secs_f64();
                     eprintln!(
-                        "Processed {} features in {:.2?} ({} features/sec)",
+                        "[{}] Processed {} features in {:.2?} ({} features/sec)",
+                        table_name_clone,
                         total_features.to_formatted_string(&Locale::en),
                         elapsed,
                         (fps as u64).to_formatted_string(&Locale::en)
@@ -335,7 +441,8 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start_time.elapsed();
             let fps = total_features as f64 / elapsed.as_secs_f64();
             eprintln!(
-                "Finished processing {} features in {:.2?} ({} features/sec)",
+                "[{}] Finished processing {} features in {:.2?} ({} features/sec)",
+                table_name_clone,
                 total_features.to_formatted_string(&Locale::en),
                 elapsed,
                 (fps as u64).to_formatted_string(&Locale::en)
@@ -396,7 +503,7 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Some(v)) => v,
                     Ok(None) => continue,
                     Err(e) => {
-                        eprintln!("Failed to read feature {path}: {e}");
+                        eprintln!("[{}] Failed to read feature {path}: {e}", table_name);
                         continue;
                     }
                 };
@@ -404,7 +511,7 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let val = match val_result {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("Failed to decode feature {path}: {e}");
+                        eprintln!("[{}] Failed to decode feature {path}: {e}", table_name);
                         continue;
                     }
                 };
@@ -508,11 +615,11 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
                 match RecordBatch::try_new(arrow_schema.clone(), columns) {
                     Ok(batch) => {
                         if let Err(e) = tx.send(batch) {
-                            eprintln!("Failed to send batch: {e}");
+                            eprintln!("[{}] Failed to send batch: {e}", table_name);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to create batch: {e}");
+                        eprintln!("[{}] Failed to create batch: {e}", table_name);
                     }
                 }
             }
@@ -521,13 +628,17 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
     match writer_handle.join() {
         Ok(result) => {
             if let Err(e) = result {
-                eprintln!("Writer thread error: {e}");
+                eprintln!("[{}] Writer thread error: {e}", table_name);
             }
         }
-        Err(e) => eprintln!("Writer thread panicked: {e:?}"),
+        Err(e) => eprintln!("[{}] Writer thread panicked: {e:?}", table_name),
     }
 
-    eprintln!("Successfully wrote GeoParquet to {}", output_path.display());
+    eprintln!(
+        "[{}] Successfully wrote GeoParquet to {}",
+        table_name,
+        output_path.display()
+    );
 
     Ok(())
 }
@@ -619,6 +730,7 @@ mod tests {
             row_group_size: 1000,
             git_rev: None,
             git_prefix: None,
+            all: false,
         };
 
         run(args)?;
@@ -685,6 +797,7 @@ mod tests {
             row_group_size: 1000,
             git_rev: None,
             git_prefix: None,
+            all: false,
         };
 
         run(args)?;
@@ -776,6 +889,7 @@ mod tests {
             row_group_size: 1000,
             git_rev: None,
             git_prefix: None,
+            all: false,
         };
 
         run(args)?;
@@ -833,12 +947,148 @@ mod tests {
             row_group_size: 1000,
             git_rev: None,
             git_prefix: None,
+            all: false,
         };
 
         let result = run(args);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Multiple datasets found"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ambiguity_resolution() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        // Dataset 1: matching
+        let ds1 = root.join("my_dataset");
+        fs::create_dir(&ds1)?;
+        create_schema(
+            &ds1,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+
+        // Dataset 2: unrelated
+        let ds2 = root.join("other_dataset");
+        fs::create_dir(&ds2)?;
+        create_schema(
+            &ds2,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+
+        // Output matches ds1
+        let output_path = root.join("my_dataset.parquet");
+
+        let args = ExportArgs {
+            path: root.to_string_lossy().to_string(),
+            output: Some(output_path.to_string_lossy().to_string()),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+            all: false,
+        };
+
+        // Should succeed by selecting ds1
+        run(args)?;
+
+        // Output ambiguous (matches neither uniquely or matches multiple - here checking no match behavior if name implies one)
+        // If we provide output name that matches NEITHER, it should fail.
+        let output_path_bad = root.join("random_output.parquet");
+        let args_bad = ExportArgs {
+            path: root.to_string_lossy().to_string(),
+            output: Some(output_path_bad.to_string_lossy().to_string()),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+            all: false,
+        };
+        let result = run(args_bad);
+        assert!(result.is_err()); // Ambiguous because none matched filter
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_all() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        // Dataset 1
+        let ds1 = root.join("dataset1");
+        fs::create_dir(&ds1)?;
+        create_schema(
+            &ds1,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+        create_legend(&ds1, "legend", vec![], vec!["col1"])?;
+        // Add feature to ds1
+        let feat_dir1 = ds1.join(".table-dataset/feature");
+        fs::create_dir_all(&feat_dir1)?;
+        let feature_data1 = Value::Array(vec![
+            Value::String("legend".into()),
+            Value::Array(vec![Value::String("d1".into())]),
+        ]);
+        let mut bytes1 = Vec::new();
+        rmp_serde::encode::write(&mut bytes1, &feature_data1)?;
+        fs::write(feat_dir1.join("f1"), bytes1)?;
+
+        // Dataset 2
+        let ds2 = root.join("dataset2");
+        fs::create_dir(&ds2)?;
+        create_schema(
+            &ds2,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+        create_legend(&ds2, "legend", vec![], vec!["col1"])?;
+        // Add feature to ds2
+        let feat_dir2 = ds2.join(".table-dataset/feature");
+        fs::create_dir_all(&feat_dir2)?;
+        let feature_data2 = Value::Array(vec![
+            Value::String("legend".into()),
+            Value::Array(vec![Value::String("d2".into())]),
+        ]);
+        let mut bytes2 = Vec::new();
+        rmp_serde::encode::write(&mut bytes2, &feature_data2)?;
+        fs::write(feat_dir2.join("f1"), bytes2)?;
+
+        // Case 1: export all to default loc (root)
+        let args = ExportArgs {
+            path: root.to_string_lossy().to_string(),
+            output: None,
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+            all: true,
+        };
+        run(args)?;
+
+        assert!(root.join("dataset1.parquet").exists());
+        assert!(root.join("dataset2.parquet").exists());
+
+        // Case 2: export all to specific directory
+        let out_dir = root.join("out");
+        let args_dir = ExportArgs {
+            path: root.to_string_lossy().to_string(),
+            output: Some(out_dir.to_string_lossy().to_string()),
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+            all: true,
+        };
+        run(args_dir)?;
+        assert!(out_dir.join("dataset1.parquet").exists());
+        assert!(out_dir.join("dataset2.parquet").exists());
 
         Ok(())
     }

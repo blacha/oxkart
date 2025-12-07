@@ -43,21 +43,26 @@ pub enum KartSourceEnum {
 }
 
 impl KartSourceEnum {
-    pub fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error>> {
+    pub fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             KartSourceEnum::Fs(s) => s.get_schema(),
             KartSourceEnum::Git(s) => s.get_schema(),
         }
     }
 
-    pub fn get_legends(&self) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error>> {
+    pub fn get_legends(
+        &self,
+    ) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             KartSourceEnum::Fs(s) => s.get_legends(),
             KartSourceEnum::Git(s) => s.get_legends(),
         }
     }
 
-    pub fn get_crs_wkt(&self, crs_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn get_crs_wkt(
+        &self,
+        crs_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             KartSourceEnum::Fs(s) => s.get_crs_wkt(crs_id),
             KartSourceEnum::Git(s) => s.get_crs_wkt(crs_id),
@@ -75,7 +80,7 @@ impl KartSourceEnum {
         &self,
         id: &FeatureIdentifier,
         f: F,
-    ) -> Result<R, Box<dyn std::error::Error>>
+    ) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -88,7 +93,7 @@ impl KartSourceEnum {
     pub fn get_feature_size(
         &self,
         id: &FeatureIdentifier,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             KartSourceEnum::Fs(s) => s.get_feature_size(id),
             KartSourceEnum::Git(s) => s.get_feature_size(id),
@@ -107,7 +112,7 @@ impl FsSource {
         }
     }
 
-    fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error>> {
+    fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error + Send + Sync>> {
         let schema_path = self.base_path.join(".table-dataset/meta/schema.json");
         let file = File::open(schema_path)?;
         let reader = BufReader::new(file);
@@ -115,7 +120,9 @@ impl FsSource {
         Ok(kart_schema)
     }
 
-    fn get_legends(&self) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error>> {
+    fn get_legends(
+        &self,
+    ) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error + Send + Sync>> {
         let legend_dir = self.base_path.join(".table-dataset/meta/legend");
         let mut legend_cache = HashMap::new();
 
@@ -196,7 +203,10 @@ impl FsSource {
         Ok(legend_cache)
     }
 
-    fn get_crs_wkt(&self, crs_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn get_crs_wkt(
+        &self,
+        crs_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let crs_filename = format!("{crs_id}.wkt");
         let crs_path = self
             .base_path
@@ -233,7 +243,7 @@ impl FsSource {
         &self,
         id: &FeatureIdentifier,
         f: F,
-    ) -> Result<R, Box<dyn std::error::Error>>
+    ) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -248,7 +258,10 @@ impl FsSource {
         }
     }
 
-    fn get_feature_size(&self, id: &FeatureIdentifier) -> Result<u64, Box<dyn std::error::Error>> {
+    fn get_feature_size(
+        &self,
+        id: &FeatureIdentifier,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         match id {
             FeatureIdentifier::Path(path) => {
                 let metadata = std::fs::metadata(path)?;
@@ -270,7 +283,7 @@ impl FsGit {
         path: impl Into<PathBuf>,
         revision: Option<&str>,
         prefix: Option<&str>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let repo_path = path.into();
         let repo = Repository::open_bare(&repo_path).or_else(|_| Repository::open(&repo_path))?;
 
@@ -299,7 +312,10 @@ impl FsGit {
         }
     }
 
-    fn get_blob_content_by_path(&self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fn get_blob_content_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         thread_local! {
             static REPO_CACHE: std::cell::RefCell<HashMap<PathBuf, Repository>> = std::cell::RefCell::new(HashMap::new());
         }
@@ -325,13 +341,15 @@ impl FsGit {
         })
     }
 
-    pub fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error>> {
+    pub fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error + Send + Sync>> {
         let buffer = self.get_blob_content_by_path(".table-dataset/meta/schema.json")?;
         let kart_schema: KartSchema = serde_json::from_slice(&buffer)?;
         Ok(kart_schema)
     }
 
-    fn get_legends(&self) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error>> {
+    fn get_legends(
+        &self,
+    ) -> Result<HashMap<String, Legend>, Box<dyn std::error::Error + Send + Sync>> {
         let mut legend_cache = HashMap::new();
 
         thread_local! {
@@ -428,7 +446,10 @@ impl FsGit {
         })
     }
 
-    fn get_crs_wkt(&self, crs_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn get_crs_wkt(
+        &self,
+        crs_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let path = format!(".table-dataset/meta/crs/{}.wkt", crs_id);
         let buffer = self.get_blob_content_by_path(&path)?;
         let wkt_string = String::from_utf8(buffer)?;
@@ -468,7 +489,7 @@ impl FsGit {
         &self,
         id: &FeatureIdentifier,
         f: F,
-    ) -> Result<R, Box<dyn std::error::Error>>
+    ) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
     where
         F: FnOnce(&[u8]) -> R,
     {
@@ -502,7 +523,10 @@ impl FsGit {
         }
     }
 
-    fn get_feature_size(&self, id: &FeatureIdentifier) -> Result<u64, Box<dyn std::error::Error>> {
+    fn get_feature_size(
+        &self,
+        id: &FeatureIdentifier,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         match id {
             FeatureIdentifier::Oid(oid) => {
                 thread_local! {
