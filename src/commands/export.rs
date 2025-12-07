@@ -803,4 +803,43 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_multiple_datasets_collision() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        // Dataset 1
+        let ds1 = root.join("dataset1");
+        fs::create_dir(&ds1)?;
+        create_schema(
+            &ds1,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+
+        // Dataset 2
+        let ds2 = root.join("dataset2");
+        fs::create_dir(&ds2)?;
+        create_schema(
+            &ds2,
+            vec![serde_json::json!({"id": "col1", "name": "c1", "dataType": "text"})],
+        )?;
+
+        let args = ExportArgs {
+            path: root.to_string_lossy().to_string(),
+            output: None,
+            compression: "uncompressed".to_string(),
+            compression_level: None,
+            row_group_size: 1000,
+            git_rev: None,
+            git_prefix: None,
+        };
+
+        let result = run(args);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Multiple datasets found"));
+
+        Ok(())
+    }
 }
