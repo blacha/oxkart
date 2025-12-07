@@ -114,9 +114,10 @@ impl FsSource {
 
     fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error + Send + Sync>> {
         let schema_path = self.base_path.join(".table-dataset/meta/schema.json");
-        let file = File::open(schema_path)?;
+        let file = File::open(&schema_path)?;
         let reader = BufReader::new(file);
-        let kart_schema: KartSchema = serde_json::from_reader(reader)?;
+        let kart_schema: KartSchema = serde_json::from_reader(reader)
+            .map_err(|e| format!("Failed to parse schema at {}: {}", schema_path.display(), e))?;
         Ok(kart_schema)
     }
 
@@ -343,7 +344,12 @@ impl FsGit {
 
     pub fn get_schema(&self) -> Result<KartSchema, Box<dyn std::error::Error + Send + Sync>> {
         let buffer = self.get_blob_content_by_path(".table-dataset/meta/schema.json")?;
-        let kart_schema: KartSchema = serde_json::from_slice(&buffer)?;
+        let kart_schema: KartSchema = serde_json::from_slice(&buffer).map_err(|e| {
+            format!(
+                "Failed to parse schema from .table-dataset/meta/schema.json: {}",
+                e
+            )
+        })?;
         Ok(kart_schema)
     }
 

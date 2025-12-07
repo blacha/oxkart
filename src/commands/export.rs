@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::source::{FsGit, FsSource, KartSourceEnum};
 
@@ -114,26 +115,31 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        pool.install(|| {
-            datasets
-                .into_par_iter()
-                .try_for_each(|(name, source)| {
-                    let output_path = if let Some(ref base) = *output_base_arc {
-                        base.join(format!("{}.parquet", name))
-                    } else {
-                        let normalized = name.replace('-', "_");
-                        Path::new(&format!("{}.parquet", normalized)).to_path_buf()
-                    };
+        let failures = AtomicUsize::new(0);
 
-                    export_dataset(source, &output_path, &args_arc, &name).map_err(
-                        |e| -> Box<dyn std::error::Error + Send + Sync> {
-                            Box::from(format!("Dataset '{}' failed: {}", name, e))
-                        },
-                    )
-                })
-                .map_err(|e| e)
-        })
-        .map_err(|e| e as Box<dyn std::error::Error>)?;
+        pool.install(|| {
+            datasets.into_par_iter().for_each(|(name, source)| {
+                let output_path = if let Some(ref base) = *output_base_arc {
+                    base.join(format!("{}.parquet", name))
+                } else {
+                    let normalized = name.replace('-', "_");
+                    Path::new(&format!("{}.parquet", normalized)).to_path_buf()
+                };
+
+                if let Err(e) = export_dataset(source, &output_path, &args_arc, &name) {
+                    eprintln!("[{}] Export failed: {}", name, e);
+                    failures.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        });
+
+        let fail_count = failures.load(Ordering::Relaxed);
+        if fail_count > 0 {
+            return Err(Box::from(format!(
+                "{} datasets failed to export",
+                fail_count
+            )));
+        }
 
         return Ok(());
     }
