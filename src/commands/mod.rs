@@ -55,7 +55,12 @@ fn find_fs_datasets(
         if entry.file_type().is_dir() {
             let table_dataset = entry.path().join(".table-dataset");
             if table_dataset.exists() {
-                let name = entry.path().display().to_string();
+                let name = entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap_or_else(|_| entry.path())
+                    .to_string_lossy()
+                    .to_string();
                 let source = KartSourceEnum::Fs(FsSource::new(entry.path()));
                 datasets.push((name, source));
                 it.skip_current_dir();
@@ -175,5 +180,21 @@ mod tests {
         let names: Vec<_> = datasets.iter().map(|d| d.0.clone()).collect();
         assert!(names.iter().any(|n| n.ends_with("dataset1")));
         assert!(names.iter().any(|n| n.ends_with("dataset2")));
+    }
+
+    #[test]
+    fn test_find_fs_datasets_absolute_path_returns_relative_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let abs_root = temp_dir.path().canonicalize().unwrap();
+        let dataset_path = abs_root.join("dataset_relative");
+        fs::create_dir(&dataset_path).unwrap();
+        fs::create_dir(dataset_path.join(".table-dataset")).unwrap();
+
+        // Pass absolute path to find_fs_datasets
+        let datasets = find_fs_datasets(abs_root.to_str().unwrap()).unwrap();
+        assert_eq!(datasets.len(), 1);
+
+        // Name should be "dataset_relative", NOT "/tmp/.../dataset_relative"
+        assert_eq!(datasets[0].0, "dataset_relative");
     }
 }

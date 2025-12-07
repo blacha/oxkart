@@ -12,11 +12,23 @@ $ oxkart list ~/kart-test
 nz_vineyard_polygons_topo_150k
 ```
 
+List with dataset schemas and output into json
+```bash
+$ oxkart list ~/kart-test --schema --json
+
+```
+
+List with dataset stats
+```bash
+$ oxkart list ~/kart-test --stats
+{"name":"nz_imagery_surveys","count":518,"size":9685898}
+```
+
 ## Export to parquet
 
 ```bash
 
-$ oxkart to-parquet ~/kart-test/ nz_vineyard_polygons_topo_150k.parquet
+$ oxkart export ~/kart-test/ nz_vineyard_polygons_topo_150k.parquet
 
 Finished processing 2,362 features in 11.85ms (199,383 features/sec)
 
@@ -32,9 +44,9 @@ metadata.xml
 .table-dataset/
 
 # Read from the file system
-$ oxkart to-parquet ~/kart-test/nz_vineyard_polygons_topo_150k nz_vineyard_polygons_topo_150k.parquet
+$ oxkart export ~/kart-test/nz_vineyard_polygons_topo_150k nz_vineyard_polygons_topo_150k.parquet
 
 # Force read from git
-$ oxkart to-parquet ~/kart-test/.git nz_vineyard_polygons_topo_150k.parquet
+$ oxkart export ~/kart-test/.git nz_vineyard_polygons_topo_150k.parquet
 
 ```

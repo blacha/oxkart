@@ -109,23 +109,31 @@ pub fn run(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
         let args_arc = Arc::new(args.clone());
         let output_base_arc = Arc::new(output_base);
 
-        datasets
-            .into_par_iter()
-            .try_for_each(|(name, source)| {
-                let output_path = if let Some(ref base) = *output_base_arc {
-                    base.join(format!("{}.parquet", name))
-                } else {
-                    let normalized = name.replace('-', "_");
-                    Path::new(&format!("{}.parquet", normalized)).to_path_buf()
-                };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-                export_dataset(source, &output_path, &args_arc, &name).map_err(
-                    |e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::from(format!("Dataset '{}' failed: {}", name, e))
-                    },
-                )
-            })
-            .map_err(|e| e as Box<dyn std::error::Error>)?;
+        pool.install(|| {
+            datasets
+                .into_par_iter()
+                .try_for_each(|(name, source)| {
+                    let output_path = if let Some(ref base) = *output_base_arc {
+                        base.join(format!("{}.parquet", name))
+                    } else {
+                        let normalized = name.replace('-', "_");
+                        Path::new(&format!("{}.parquet", normalized)).to_path_buf()
+                    };
+
+                    export_dataset(source, &output_path, &args_arc, &name).map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::from(format!("Dataset '{}' failed: {}", name, e))
+                        },
+                    )
+                })
+                .map_err(|e| e)
+        })
+        .map_err(|e| e as Box<dyn std::error::Error>)?;
 
         return Ok(());
     }
@@ -277,6 +285,11 @@ fn export_dataset(
             // All others map to Utf8 (text, date, time, timestamp, interval, numeric)
             _ => DataType::Utf8,
         };
+
+        eprintln!(
+            "[{}] Field '{}': '{}' -> '{:?}'",
+            table_name, field.name, field.data_type, arrow_type
+        );
 
         arrow_fields.push(Field::new(&field.name, arrow_type, true));
         field_indices.insert(field.id.clone(), i);
@@ -1061,7 +1074,7 @@ mod tests {
         // Case 1: export all to default loc (root)
         let args = ExportArgs {
             path: root.to_string_lossy().to_string(),
-            output: None,
+            output: Some(root.to_string_lossy().to_string()),
             compression: "uncompressed".to_string(),
             compression_level: None,
             row_group_size: 1000,
