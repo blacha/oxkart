@@ -1,5 +1,4 @@
 pub mod list;
-pub mod stats;
 pub mod to_parquet;
 
 use crate::source::{FsGit, FsSource, KartSourceEnum};
