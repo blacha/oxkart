@@ -1,5 +1,7 @@
 pub mod export;
+pub mod import;
 pub mod list;
+pub mod reindex;
 
 use crate::source::{FsGit, FsSource, KartSourceEnum};
 use git2::{ObjectType, Repository, Tree};
