@@ -2,7 +2,7 @@
     "packages": {
         ".": {
             "release-type": "rust",
-            "component": "oxkart"
+            "include-v-in-tag": true
         }
     }
 }
