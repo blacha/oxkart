@@ -338,12 +338,7 @@ fn export_dataset(
                         .collect::<Vec<_>>()
                         .join(" ");
 
-                    geom_meta.insert(
-                        "crs".to_string(),
-                        serde_json::json!({
-                            "wkt": clean_wkt
-                        }),
-                    );
+                    geom_meta.insert("crs".to_string(), serde_json::Value::String(clean_wkt));
                     eprintln!("[{}] Loaded CRS for {crs_id}", table_name);
                 }
                 Err(e) => {
@@ -412,14 +407,22 @@ fn export_dataset(
     }
 
     let mut legend_schema_mapping: HashMap<String, Vec<Option<usize>>> = HashMap::new();
+    let mut legend_pk_mapping: HashMap<String, Vec<Option<usize>>> = HashMap::new();
 
-    for (legend_id, (_pks, cols)) in &legend_cache {
+    for (legend_id, (pks, cols)) in &legend_cache {
         let mut mapping = Vec::with_capacity(kart_schema.len());
+        let mut pk_mapping = Vec::with_capacity(kart_schema.len());
+
         for field in &kart_schema {
             let msgpack_idx = cols.iter().position(|c| c == &field.id);
             mapping.push(msgpack_idx);
+
+            // Check if this field is a primary key
+            let pk_idx = pks.iter().position(|pk| pk == &field.id);
+            pk_mapping.push(pk_idx);
         }
         legend_schema_mapping.insert(legend_id.clone(), mapping);
+        legend_pk_mapping.insert(legend_id.clone(), pk_mapping);
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<RecordBatch>();
@@ -473,6 +476,9 @@ fn export_dataset(
         },
     );
 
+    let legend_schema_mapping = Arc::new(legend_schema_mapping);
+    let legend_pk_mapping = Arc::new(legend_pk_mapping);
+
     use itertools::Itertools;
 
     let chunk_size = 4_096;
@@ -490,158 +496,195 @@ fn export_dataset(
             if batch.is_empty() { None } else { Some(batch) }
         })
         .par_bridge()
-        .for_each_with(tx, |tx, chunk| {
-            let mut col_builders: Vec<KartBuilder> = Vec::with_capacity(kart_schema.len());
-            for field in &kart_schema {
-                let builder = match field.data_type.as_str() {
-                    "boolean" => KartBuilder::Boolean(BooleanBuilder::new()),
-                    "integer" => KartBuilder::Int64(Int64Builder::new()),
-                    "float" => KartBuilder::Float64(Float64Builder::new()),
-                    "blob" => KartBuilder::Binary(BinaryBuilder::new()),
-                    "geometry" => KartBuilder::Binary(BinaryBuilder::new()),
-                    _ => KartBuilder::String(StringBuilder::new()),
-                };
-                col_builders.push(builder);
-            }
-
-            let mut row_count = 0;
-
-            for path in chunk {
-                let res = source.read_feature(&path, |buffer| {
-                    if buffer.is_empty() {
-                        return None;
-                    }
-
-                    let val: Result<Value, _> = rmp_serde::from_slice(buffer);
-
-                    Some(val)
-                });
-
-                let val_result = match res {
-                    Ok(Some(v)) => v,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        eprintln!("[{}] Failed to read feature {path}: {e}", table_name);
-                        continue;
-                    }
-                };
-
-                let val = match val_result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("[{}] Failed to decode feature {path}: {e}", table_name);
-                        continue;
-                    }
-                };
-
-                let Value::Array(arr) = val else {
-                    continue;
-                };
-
-                if arr.len() < 2 {
-                    continue;
+        .for_each_with(
+            (tx, legend_schema_mapping.clone(), legend_pk_mapping.clone()),
+            |(tx, legend_schema_mapping, legend_pk_mapping), chunk| {
+                let mut col_builders: Vec<KartBuilder> = Vec::with_capacity(kart_schema.len());
+                for field in &kart_schema {
+                    let builder = match field.data_type.as_str() {
+                        "boolean" => KartBuilder::Boolean(BooleanBuilder::new()),
+                        "integer" => KartBuilder::Int64(Int64Builder::new()),
+                        "float" => KartBuilder::Float64(Float64Builder::new()),
+                        "blob" => KartBuilder::Binary(BinaryBuilder::new()),
+                        "geometry" => KartBuilder::Binary(BinaryBuilder::new()),
+                        _ => KartBuilder::String(StringBuilder::new()),
+                    };
+                    col_builders.push(builder);
                 }
 
-                let Value::String(ref legend_id_val) = arr[0] else {
-                    continue;
-                };
+                let mut row_count = 0;
 
-                let legend_id = legend_id_val.as_str().unwrap_or_default();
+                for (filename, path) in chunk {
+                    // Decode filename to extract PK values
+                    use base64::Engine;
+                    let pk_values: Option<Vec<Value>> = base64::engine::general_purpose::STANDARD
+                        .decode(&filename)
+                        .ok()
+                        .and_then(|bytes| rmp_serde::from_slice::<Value>(&bytes).ok())
+                        .and_then(|val| match val {
+                            Value::Array(arr) => Some(arr),
+                            single => Some(vec![single]),
+                        });
 
-                let Some(mapping) = legend_schema_mapping.get(legend_id) else {
-                    continue;
-                };
-
-                let Value::Array(val_arr) = &arr[1] else {
-                    continue;
-                };
-
-                row_count += 1;
-
-                for (idx, msgpack_idx_opt) in mapping.iter().enumerate() {
-                    let builder = &mut col_builders[idx];
-
-                    let val_opt = if let Some(msgpack_idx) = msgpack_idx_opt {
-                        if *msgpack_idx < val_arr.len() {
-                            Some(&val_arr[*msgpack_idx])
-                        } else {
-                            None
+                    let res = source.read_feature(&path, |buffer| {
+                        if buffer.is_empty() {
+                            return None;
                         }
-                    } else {
-                        None
+
+                        let val: Result<Value, _> = rmp_serde::from_slice(buffer);
+
+                        Some(val)
+                    });
+
+                    let val_result = match res {
+                        Ok(Some(v)) => v,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            eprintln!("[{}] Failed to read feature {}: {e}", table_name, filename);
+                            continue;
+                        }
                     };
 
-                    match builder {
-                        KartBuilder::Boolean(b_builder) => match val_opt {
-                            Some(Value::Boolean(b)) => b_builder.append_value(*b),
-                            _ => b_builder.append_null(),
-                        },
-                        KartBuilder::Int64(i_builder) => match val_opt {
-                            Some(Value::Integer(n)) => {
-                                if n.is_i64() {
-                                    i_builder.append_value(n.as_i64().unwrap());
-                                } else {
-                                    i_builder.append_value(n.as_u64().unwrap() as i64);
-                                }
-                            }
-                            _ => i_builder.append_null(),
-                        },
-                        KartBuilder::Float64(f_builder) => match val_opt {
-                            Some(Value::F64(f)) => f_builder.append_value(*f),
-                            Some(Value::F32(f)) => f_builder.append_value(*f as f64),
-                            _ => f_builder.append_null(),
-                        },
-                        KartBuilder::String(s_builder) => match val_opt {
-                            Some(Value::String(s)) => s_builder.append_value(s.as_str().unwrap()),
-                            Some(Value::Integer(n)) => s_builder.append_value(n.to_string()),
-                            Some(Value::F64(f)) => s_builder.append_value(f.to_string()),
-                            Some(Value::F32(f)) => s_builder.append_value(f.to_string()),
-                            Some(Value::Boolean(b)) => s_builder.append_value(b.to_string()),
-                            Some(Value::Map(_)) | Some(Value::Array(_)) => {
-                                if let Ok(json_str) = serde_json::to_string(val_opt.unwrap()) {
-                                    s_builder.append_value(json_str);
-                                } else {
-                                    s_builder.append_null();
-                                }
-                            }
-                            _ => s_builder.append_null(),
-                        },
-                        KartBuilder::Binary(bin_builder) => match val_opt {
-                            Some(Value::Ext(type_id, data)) if *type_id == 71 => {
-                                let wkb = extract_wkb(data);
-                                bin_builder.append_value(wkb);
-                            }
-                            Some(Value::Binary(b)) => bin_builder.append_value(b),
-                            _ => bin_builder.append_null(),
-                        },
-                    }
-                }
-            }
+                    let val = match val_result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!(
+                                "[{}] Failed to decode feature {}: {e}",
+                                table_name, filename
+                            );
+                            continue;
+                        }
+                    };
 
-            if row_count > 0 {
-                let mut columns: Vec<ArrayRef> = Vec::new();
-                for builder in col_builders {
-                    match builder {
-                        KartBuilder::Boolean(mut b) => columns.push(Arc::new(b.finish())),
-                        KartBuilder::Int64(mut b) => columns.push(Arc::new(b.finish())),
-                        KartBuilder::Float64(mut b) => columns.push(Arc::new(b.finish())),
-                        KartBuilder::String(mut b) => columns.push(Arc::new(b.finish())),
-                        KartBuilder::Binary(mut b) => columns.push(Arc::new(b.finish())),
-                    }
-                }
+                    let Value::Array(arr) = val else {
+                        continue;
+                    };
 
-                match RecordBatch::try_new(arrow_schema.clone(), columns) {
-                    Ok(batch) => {
-                        if let Err(e) = tx.send(batch) {
-                            eprintln!("[{}] Failed to send batch: {e}", table_name);
+                    if arr.len() < 2 {
+                        continue;
+                    }
+
+                    let Value::String(ref legend_id_val) = arr[0] else {
+                        continue;
+                    };
+
+                    let legend_id = legend_id_val.as_str().unwrap_or_default();
+
+                    let Some(mapping) = legend_schema_mapping.get(legend_id) else {
+                        continue;
+                    };
+
+                    let Value::Array(val_arr) = &arr[1] else {
+                        continue;
+                    };
+
+                    row_count += 1;
+
+                    let pk_mapping = legend_pk_mapping.get(legend_id);
+
+                    for (idx, msgpack_idx_opt) in mapping.iter().enumerate() {
+                        let builder = &mut col_builders[idx];
+
+                        // Check if this column is a PK and we have PK values from the filename
+                        let val_opt = if let (Some(pk_map), Some(pks)) = (pk_mapping, &pk_values) {
+                            if let Some(Some(pk_idx)) = pk_map.get(idx) {
+                                // This is a PK column, use value from filename
+                                pks.get(*pk_idx)
+                            } else if let Some(msgpack_idx) = msgpack_idx_opt {
+                                // Not a PK, use value from feature content
+                                if *msgpack_idx < val_arr.len() {
+                                    Some(&val_arr[*msgpack_idx])
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else if let Some(msgpack_idx) = msgpack_idx_opt {
+                            // No PK mapping available, use feature content
+                            if *msgpack_idx < val_arr.len() {
+                                Some(&val_arr[*msgpack_idx])
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        match builder {
+                            KartBuilder::Boolean(b_builder) => match val_opt {
+                                Some(Value::Boolean(b)) => b_builder.append_value(*b),
+                                _ => b_builder.append_null(),
+                            },
+                            KartBuilder::Int64(i_builder) => match val_opt {
+                                Some(Value::Integer(n)) => {
+                                    if n.is_i64() {
+                                        i_builder.append_value(n.as_i64().unwrap());
+                                    } else {
+                                        i_builder.append_value(n.as_u64().unwrap() as i64);
+                                    }
+                                }
+                                _ => i_builder.append_null(),
+                            },
+                            KartBuilder::Float64(f_builder) => match val_opt {
+                                Some(Value::F64(f)) => f_builder.append_value(*f),
+                                Some(Value::F32(f)) => f_builder.append_value(*f as f64),
+                                _ => f_builder.append_null(),
+                            },
+                            KartBuilder::String(s_builder) => match val_opt {
+                                Some(Value::String(s)) => {
+                                    s_builder.append_value(s.as_str().unwrap())
+                                }
+                                Some(Value::Integer(n)) => s_builder.append_value(n.to_string()),
+                                Some(Value::F64(f)) => s_builder.append_value(f.to_string()),
+                                Some(Value::F32(f)) => s_builder.append_value(f.to_string()),
+                                Some(Value::Boolean(b)) => s_builder.append_value(b.to_string()),
+                                Some(Value::Map(_)) | Some(Value::Array(_)) => {
+                                    if let Ok(json_str) = serde_json::to_string(val_opt.unwrap()) {
+                                        s_builder.append_value(json_str);
+                                    } else {
+                                        s_builder.append_null();
+                                    }
+                                }
+                                _ => s_builder.append_null(),
+                            },
+                            KartBuilder::Binary(bin_builder) => match val_opt {
+                                Some(Value::Ext(type_id, data)) if *type_id == 71 => {
+                                    let wkb = extract_wkb(data);
+                                    bin_builder.append_value(wkb);
+                                }
+                                Some(Value::Binary(b)) => bin_builder.append_value(b),
+                                _ => bin_builder.append_null(),
+                            },
                         }
                     }
-                    Err(e) => {
-                        eprintln!("[{}] Failed to create batch: {e}", table_name);
+                }
+
+                if row_count > 0 {
+                    let mut columns: Vec<ArrayRef> = Vec::new();
+                    for builder in col_builders {
+                        match builder {
+                            KartBuilder::Boolean(mut b) => columns.push(Arc::new(b.finish())),
+                            KartBuilder::Int64(mut b) => columns.push(Arc::new(b.finish())),
+                            KartBuilder::Float64(mut b) => columns.push(Arc::new(b.finish())),
+                            KartBuilder::String(mut b) => columns.push(Arc::new(b.finish())),
+                            KartBuilder::Binary(mut b) => columns.push(Arc::new(b.finish())),
+                        }
+                    }
+
+                    match RecordBatch::try_new(arrow_schema.clone(), columns) {
+                        Ok(batch) => {
+                            if let Err(e) = tx.send(batch) {
+                                eprintln!("[{}] Failed to send batch: {e}", table_name);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Failed to create batch: {e}", table_name);
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
 
     match writer_handle.join() {
         Ok(result) => {
@@ -834,9 +877,8 @@ mod tests {
             .unwrap();
         let geo_meta: serde_json::Value = serde_json::from_str(geo_meta_str)?;
 
-        let crs = &geo_meta["columns"]["geom"]["crs"];
-
-        let wkt_out = crs["wkt"].as_str().unwrap();
+        let crs = geo_meta["columns"]["geom"]["crs"].as_str().unwrap();
+        let wkt_out = crs;
         assert!(wkt_out.contains(r#"AUTHORITY["EPSG","2193"]"#));
 
         Ok(())

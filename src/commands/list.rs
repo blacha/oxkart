@@ -116,7 +116,7 @@ fn calculate_stats(
 
     let size: u64 = identifiers
         .par_iter()
-        .map(|id| source.get_feature_size(id).unwrap_or(0))
+        .map(|(_filename, id)| source.get_feature_size(id).unwrap_or(0))
         .sum();
 
     Ok(DatasetStats { name, count, size })

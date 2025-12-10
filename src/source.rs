@@ -69,7 +69,9 @@ impl KartSourceEnum {
         }
     }
 
-    pub fn feature_identifiers(&self) -> Box<dyn Iterator<Item = FeatureIdentifier> + Send> {
+    pub fn feature_identifiers(
+        &self,
+    ) -> Box<dyn Iterator<Item = (String, FeatureIdentifier)> + Send> {
         match self {
             KartSourceEnum::Fs(s) => s.feature_identifiers(),
             KartSourceEnum::Git(s) => s.feature_identifiers(),
@@ -224,7 +226,7 @@ impl FsSource {
         }
     }
 
-    fn feature_identifiers(&self) -> Box<dyn Iterator<Item = FeatureIdentifier> + Send> {
+    fn feature_identifiers(&self) -> Box<dyn Iterator<Item = (String, FeatureIdentifier)> + Send> {
         let feature_dir = self.base_path.join(".table-dataset/feature");
         if !feature_dir.exists() {
             return Box::new(std::iter::empty());
@@ -236,7 +238,15 @@ impl FsSource {
             walker
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
-                .map(|e| FeatureIdentifier::Path(e.into_path())),
+                .map(|e| {
+                    let path = e.into_path();
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    (filename, FeatureIdentifier::Path(path))
+                }),
         )
     }
 
@@ -462,8 +472,8 @@ impl FsGit {
         Ok(wkt_string.trim().to_string())
     }
 
-    fn feature_identifiers(&self) -> Box<dyn Iterator<Item = FeatureIdentifier> + Send> {
-        let mut oids = Vec::new();
+    fn feature_identifiers(&self) -> Box<dyn Iterator<Item = (String, FeatureIdentifier)> + Send> {
+        let mut items = Vec::new();
 
         if let Ok(repo) =
             Repository::open_bare(&self.repo_path).or_else(|_| Repository::open(&self.repo_path))
@@ -475,9 +485,12 @@ impl FsGit {
                     {
                         feature_tree
                             .walk(git2::TreeWalkMode::PreOrder, |_, entry| {
-                                if let Some(_name) = entry.name() {
+                                if let Some(name) = entry.name() {
                                     if entry.kind() == Some(ObjectType::Blob) {
-                                        oids.push(FeatureIdentifier::Oid(entry.id()));
+                                        items.push((
+                                            name.to_string(),
+                                            FeatureIdentifier::Oid(entry.id()),
+                                        ));
                                     }
                                 }
                                 git2::TreeWalkResult::Ok
@@ -488,7 +501,7 @@ impl FsGit {
             }
         }
 
-        Box::new(oids.into_iter())
+        Box::new(items.into_iter())
     }
 
     fn read_feature<F, R>(
