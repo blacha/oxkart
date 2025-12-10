@@ -341,7 +341,6 @@ fn export_dataset(
                     geom_meta.insert(
                         "crs".to_string(),
                         serde_json::json!({
-                            "encoding": "wkt",
                             "wkt": clean_wkt
                         }),
                     );
@@ -836,7 +835,7 @@ mod tests {
         let geo_meta: serde_json::Value = serde_json::from_str(geo_meta_str)?;
 
         let crs = &geo_meta["columns"]["geom"]["crs"];
-        assert_eq!(crs["encoding"], "wkt");
+
         let wkt_out = crs["wkt"].as_str().unwrap();
         assert!(wkt_out.contains(r#"AUTHORITY["EPSG","2193"]"#));
 
